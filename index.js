@@ -487,18 +487,14 @@ app.post('/metrics/:id/media', authenticateToken, (req, res) => {
 			// Persist to DB and disk (best effort)
 			const inserted = [];
 			for (const f of filesMeta) {
-				// write to disk for static serving if available
-				try {
-					fs.writeFileSync(path.join(uploadsDir, f.filename), f.buffer);
-				} catch {}
-				// Insert into DB with binary data
+				// Insert into DB with binary data only (no disk write)
 				const row = await pool.query(
 					'INSERT INTO media (user_id, metric_id, filename, originalname, mimetype, size, url, data) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
 					[userId, metricId, f.filename, f.originalname, f.mimetype, f.size, `${req.protocol}://${req.get('host')}/media/PLACEHOLDER`, f.buffer]
 				);
 				inserted.push(row.rows[0]);
 			}
-
+			
 			// Replace URLs to point to DB streaming endpoint
 			const files = inserted.map(m => ({
 				...m,
@@ -553,18 +549,36 @@ app.get('/media/:mediaId/file', authenticateToken, async (req, res) => {
 		const media = result.rows[0];
 		if (media.data) {
 			res.setHeader('Content-Type', media.mimetype || 'application/octet-stream');
+			if (media.size) {
+				res.setHeader('Content-Length', media.size.toString());
+			}
 			return res.send(media.data);
-		}
-		// Fallback to disk if no data stored
-		const filePath = path.join(uploadsDir, media.filename);
-		if (fs.existsSync(filePath)) {
-			res.setHeader('Content-Type', media.mimetype || 'application/octet-stream');
-			return fs.createReadStream(filePath).pipe(res);
 		}
 		return res.status(404).json({ error: 'Media data not available' });
 	} catch (e) {
 		console.error('Stream media error:', e);
 		return res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+// Add HEAD route to allow clients to probe media type/size without downloading
+app.head('/media/:mediaId/file', authenticateToken, async (req, res) => {
+	try {
+		const userId = req.user.userId;
+		const mediaId = parseInt(req.params.mediaId, 10);
+		const result = await pool.query('SELECT id, user_id, mimetype, size FROM media WHERE id = $1 AND user_id = $2', [mediaId, userId]);
+		if (result.rows.length === 0) {
+			return res.status(404).end();
+		}
+		const media = result.rows[0];
+		res.setHeader('Content-Type', media.mimetype || 'application/octet-stream');
+		if (media.size) {
+			res.setHeader('Content-Length', media.size.toString());
+		}
+		return res.status(200).end();
+	} catch (e) {
+		console.error('HEAD media error:', e);
+		return res.status(500).end();
 	}
 });
 
